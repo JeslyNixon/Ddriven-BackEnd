@@ -47,9 +47,13 @@ class AuthController extends Controller
             notes:      "User '{$user->name}' logged in"
         );
 
+       
         return response()->json([
             'token' => $token,
-            'user' => $user
+            'user' => $user,
+            'roles'       => $user->getRoleNames(),          
+            'permissions' => $user->getAllPermissions()     
+                                  ->pluck('name'),   
         ]);
     }
 

@@ -4,8 +4,9 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
+use Spatie\Permission\Models\Role as SpatieRole;
 
-class Role extends Model
+class Role extends SpatieRole
 {
     use HasFactory;
 
@@ -26,7 +27,7 @@ class Role extends Model
     /**
      * The users that belong to the role (Many-to-Many)
      */
-    public function users()
+   /*  public function users()
     {
         return $this->belongsToMany(User::class, 'user_role')
                     ->withTimestamps();
@@ -37,11 +38,11 @@ class Role extends Model
      * 
      * @return \Illuminate\Database\Eloquent\Collection
      */
-    public function getUsersWithRole()
+    /* function getUsersWithRole()
     {
         return $this->users()->get();
     }
-
+ */
     /**
      * Check if any users have this role
      * 
@@ -70,4 +71,5 @@ class Role extends Model
     {
         return $this->belongsTo(User::class, 'updated_by');
     }
+    
 }

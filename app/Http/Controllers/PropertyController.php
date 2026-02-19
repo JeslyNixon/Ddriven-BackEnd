@@ -10,10 +10,17 @@ use App\Models\PropertySummary;
 use App\Models\PropertyInspectionSignoff;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\Log;
 use Barryvdh\DomPDF\Facade\Pdf;
+use PhpOffice\PhpSpreadsheet\Spreadsheet;
 use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
+use PhpOffice\PhpSpreadsheet\Style\Fill;
+use PhpOffice\PhpSpreadsheet\Style\Alignment;
+use PhpOffice\PhpSpreadsheet\Style\Border;
+use Illuminate\Support\Str;
+use Illuminate\Support\Facades\Auth;
 
 class PropertyController extends Controller
 {
@@ -342,4 +349,423 @@ private function hasData(array $data): bool
     }
     return false; // All fields are empty/null → skip saving
 }
+
+   public function generatePdf(Request $request)
+{
+    try {
+        $query = PropertyMaster::query();
+
+        // Filter by status
+         $filteredStatus =$request->status;
+        if ($request->filled('status') && $request->status !== 'all') {
+            $query->whereHas('propertyStatus', function($q) use ($request,$filteredStatus) {
+                $q->where('name',  $filteredStatus);
+            });
+        }
+
+        // Sort
+        $sortBy = $request->get('sortBy', 'created_at');
+        $sortOrder = $request->get('sortOrder', 'desc');
+        $query->orderBy($sortBy, $sortOrder);
+
+        // Load relationships - THIS IS IMPORTANT
+        $properties = $query->with(['creator', 'updater', 'propertyStatus'])->get();
+// \Log::info('Properties data:', $properties->toArray());
+      
+        // Generate PDF
+        $pdf = Pdf::loadView('pdf.properties', compact('properties','filteredStatus'))
+            ->setPaper('a4', 'landscape')
+            ->setOption('margin-top', 10)
+            ->setOption('margin-bottom', 10)
+            ->setOption('margin-left', 20)
+            ->setOption('margin-right', 20);
+        
+        // Return as stream (for modal view)
+        return $pdf->stream('properties-list-' . date('d-m-Y') . '.pdf');
+        
+    } catch (\Exception $e) {
+        return response()->json([
+            'success' => false,
+            'message' => 'Failed to generate PDF: ' . $e->getMessage()
+        ], 500);
+    }
+}
+ public function generateSpreadsheet(Request $request)
+    {
+        try {
+            $query = PropertyMaster::query();
+            
+            // Filter by status
+            $filteredStatus = $request->status ?? 'all';
+            if ($request->filled('status') && $request->status !== 'all') {
+                $query->whereHas('propertyStatus', function($q) use ($filteredStatus) {
+                    $q->where('name', $filteredStatus);
+                });
+            }
+            
+            // Sort
+            $sortBy = $request->get('sortBy', 'created_at');
+            $sortOrder = $request->get('sortOrder', 'desc');
+            $query->orderBy($sortBy, $sortOrder);
+            
+            // Load relationships
+            $properties = $query->with(['creator', 'updater', 'propertyStatus'])->get();
+            
+            // Create new Spreadsheet
+            $spreadsheet = new Spreadsheet();
+            $sheet = $spreadsheet->getActiveSheet();
+            $sheet->setTitle('Properties List');
+            
+            // Set up title row
+            $sheet->mergeCells('A1:G1');
+            $sheet->setCellValue('A1', 'Properties List Report');
+            $sheet->getStyle('A1')->applyFromArray([
+                'font' => [
+                    'bold' => true,
+                    'size' => 18,
+                    'color' => ['rgb' => '2c3e50'],
+                ],
+                'alignment' => [
+                    'horizontal' => Alignment::HORIZONTAL_CENTER,
+                    'vertical' => Alignment::VERTICAL_CENTER,
+                ],
+            ]);
+            $sheet->getRowDimension(1)->setRowHeight(30);
+            
+            // Meta information row
+            $sheet->mergeCells('A2:G2');
+            $metaInfo = 'Generated on ' . date('F d, Y \a\t h:i A') . 
+                       ' | Status: ' . ucfirst($filteredStatus) . 
+                       ' | Total Properties: ' . $properties->count();
+            $sheet->setCellValue('A2', $metaInfo);
+            $sheet->getStyle('A2')->applyFromArray([
+                'font' => [
+                    'size' => 10,
+                    'color' => ['rgb' => '7f8c8d'],
+                ],
+                'alignment' => [
+                    'horizontal' => Alignment::HORIZONTAL_CENTER,
+                ],
+            ]);
+            $sheet->getRowDimension(2)->setRowHeight(20);
+
+            
+            // Header row (row 3)
+            $headers = ['#', 'Project ID', 'Status', 'Owner Name', 'Bank', 'Site Address', 'Created Date'];
+            $columns = ['A', 'B', 'C', 'D', 'E', 'F', 'G'];
+            
+            foreach ($headers as $index => $header) {
+                $sheet->setCellValue($columns[$index] . '3', $header);
+            }
+            
+            // Style header row
+            $sheet->getStyle('A3:G3')->applyFromArray([
+                'font' => [
+                    'bold' => true,
+                    'color' => ['rgb' => 'FFFFFF'],
+                    'size' => 12,
+                ],
+                'fill' => [
+                    'fillType' => Fill::FILL_SOLID,
+                    'startColor' => ['rgb' => '34495e'],
+                ],
+                'alignment' => [
+                    'horizontal' => Alignment::HORIZONTAL_CENTER,
+                    'vertical' => Alignment::VERTICAL_CENTER,
+                ],
+            ]);
+            $sheet->getRowDimension(3)->setRowHeight(25);
+            
+            // Add data rows
+            $rowIndex = 4;
+            $dataRowNumber = 1;
+            
+            foreach ($properties as $property) {
+                $sheet->setCellValue('A' . $rowIndex, $dataRowNumber);
+                $sheet->setCellValue('B' . $rowIndex, $property->project_id);
+                $sheet->setCellValue('C' . $rowIndex, $property->propertyStatus->name ?? 'N/A');
+                $sheet->setCellValue('D' . $rowIndex, $property->owner_name);
+                $sheet->setCellValue('E' . $rowIndex, $property->bank);
+                $sheet->setCellValue('F' . $rowIndex, $property->site_address);
+                $sheet->setCellValue('G' . $rowIndex, $property->created_at->format('M d, Y'));
+                
+                // Apply alternating row colors
+                if ($rowIndex % 2 == 0) {
+                    $sheet->getStyle("A{$rowIndex}:G{$rowIndex}")->applyFromArray([
+                        'fill' => [
+                            'fillType' => Fill::FILL_SOLID,
+                            'startColor' => ['rgb' => 'f8f9fa'],
+                        ],
+                    ]);
+                }
+                
+                $rowIndex++;
+                $dataRowNumber++;
+            }
+            
+            $lastRow = $rowIndex - 1;
+            
+            // Apply borders to all data
+            $sheet->getStyle("A3:G{$lastRow}")->applyFromArray([
+                'borders' => [
+                    'allBorders' => [
+                        'borderStyle' => Border::BORDER_THIN,
+                        'color' => ['rgb' => 'e0e0e0'],
+                    ],
+                ],
+            ]);
+            
+            // Center align specific columns
+            $sheet->getStyle("A4:A{$lastRow}")->getAlignment()
+                ->setHorizontal(Alignment::HORIZONTAL_CENTER);
+            $sheet->getStyle("C4:C{$lastRow}")->getAlignment()
+                ->setHorizontal(Alignment::HORIZONTAL_CENTER);
+            $sheet->getStyle("G4:G{$lastRow}")->getAlignment()
+                ->setHorizontal(Alignment::HORIZONTAL_CENTER);
+            
+            // Wrap text for address column
+            $sheet->getStyle("F4:F{$lastRow}")->getAlignment()
+                ->setWrapText(true);
+            
+            // Set column widths
+            $sheet->getColumnDimension('A')->setWidth(8);
+            $sheet->getColumnDimension('B')->setWidth(15);
+            $sheet->getColumnDimension('C')->setWidth(15);
+            $sheet->getColumnDimension('D')->setWidth(25);
+            $sheet->getColumnDimension('E')->setWidth(25);
+            $sheet->getColumnDimension('F')->setWidth(40);
+            $sheet->getColumnDimension('G')->setWidth(15);
+            
+            // Generate filename
+            $filename = 'properties-list-' . date('Y-m-d') . '.xlsx';
+            
+            // Create writer and save to temp file
+            $writer = new Xlsx($spreadsheet);
+            $tempFile = tempnam(sys_get_temp_dir(), 'excel_');
+            $writer->save($tempFile);
+            
+            // Return file as download
+            return response()->download($tempFile, $filename, [
+                'Content-Type' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            ])->deleteFileAfterSend(true);
+            
+        } catch (\Exception $e) {
+            \Log::error('Excel export failed: ' . $e->getMessage());
+            
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to generate spreadsheet: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+     public function approveProperty(Request $request)
+    {
+        // Validate request
+        $validator = Validator::make($request->all(), [
+            'id' => 'required|exists:property_master,id',
+            'inspector_name' => 'required|string|min:3|max:100',
+            'inspection_date' => 'required|date',
+            'declaration_accepted' => 'required|boolean',
+            'signature' => 'required|string', // base64 encoded image
+            'signature_type' => 'required|in:draw,upload'
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Validation failed',
+                'errors' => $validator->errors()
+            ], 422);
+        }
+
+        try {
+            DB::beginTransaction();
+
+            $propertyId = $request->id;
+            $inspectorName = $request->inspector_name;
+            $inspectionDate = $request->inspection_date;
+            $signatureBase64 = $request->signature;
+            $userId = Auth::id() ?? 1; // Get authenticated user ID
+
+            // Save signature file
+            $signaturePath = $this->saveSignature($signatureBase64);
+
+            // Insert into property_inspection_signoff
+            $signoffId = DB::table('property_inspection_signoff')->insertGetId([
+                'property_id' => $propertyId,
+                'inspector_name' => $inspectorName,
+                'inspector_signature' => $signaturePath,
+                'inspection_date' => $inspectionDate,
+                'created_by' => $userId,
+                'created_at' => now(),
+                'updated_at' => now()
+            ]);
+
+            // Update property_master status to 'approved'
+            DB::table('property_master')
+                ->where('id', $propertyId)
+                ->update([
+                    'status' => 3,
+                    'updated_at' => now()
+                ]);
+
+            DB::commit();
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Property approved successfully',
+                'data' => [
+                    'signoff_id' => $signoffId,
+                    'property_id' => $propertyId,
+                    'status' => 'approved'
+                ]
+            ], 200);
+
+        } catch (\Exception $e) {
+            DB::rollBack();
+            
+            // Delete signature file if it was created
+            if (isset($signaturePath)) {
+                Storage::disk('public')->delete($signaturePath);
+            }
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to approve property',
+                'error' => $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * Bulk Properties Approval
+     * POST /api/bulk-approve-properties
+     */
+    public function bulkApproveProperties(Request $request)
+    {
+        // Validate request
+        $validator = Validator::make($request->all(), [
+            'property_ids' => 'required|array|min:1',
+            'property_ids.*' => 'required|exists:property_master,id',
+            'inspector_name' => 'required|string|min:3|max:100',
+            'inspection_date' => 'required|date',
+            'declaration_accepted' => 'required|boolean',
+            'signature' => 'required|string', // base64 encoded image
+            'signature_type' => 'required|in:draw,upload'
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Validation failed',
+                'errors' => $validator->errors()
+            ], 422);
+        }
+
+        try {
+            DB::beginTransaction();
+
+            $propertyIds = $request->property_ids;
+            $inspectorName = $request->inspector_name;
+            $inspectionDate = $request->inspection_date;
+            $signatureBase64 = $request->signature;
+            $userId = Auth::id() ?? 1; // Get authenticated user ID
+
+            // Save signature file (single signature for all properties)
+            $signaturePath = $this->saveSignature($signatureBase64);
+
+            $signoffIds = [];
+            $currentTimestamp = now();
+
+            // Prepare bulk insert data for property_inspection_signoff
+            $signoffRecords = [];
+            foreach ($propertyIds as $propertyId) {
+                $signoffRecords[] = [
+                    'property_id' => $propertyId,
+                    'inspector_name' => $inspectorName,
+                    'inspector_signature' => $signaturePath,
+                    'inspection_date' => $inspectionDate,
+                    'created_by' => $userId,
+                    'created_at' => $currentTimestamp,
+                    'updated_at' => $currentTimestamp
+                ];
+            }
+
+            // Bulk insert into property_inspection_signoff
+            DB::table('property_inspection_signoff')->insert($signoffRecords);
+
+            // Update all property_master statuses to 'approved'
+            DB::table('property_master')
+                ->whereIn('id', $propertyIds)
+                ->update([
+                    'status' => 3,
+                    'updated_at' => $currentTimestamp
+                ]);
+
+            DB::commit();
+
+            return response()->json([
+                'success' => true,
+                'message' => count($propertyIds) . ' properties approved successfully',
+                'data' => [
+                    'approved_count' => count($propertyIds),
+                    'property_ids' => $propertyIds,
+                    'status' => 'approved'
+                ]
+            ], 200);
+
+        } catch (\Exception $e) {
+            DB::rollBack();
+            
+            // Delete signature file if it was created
+            if (isset($signaturePath)) {
+                Storage::disk('public')->delete($signaturePath);
+            }
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to approve properties',
+                'error' => $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * Helper function to save base64 signature to storage
+     * 
+     * @param string $signatureBase64
+     * @return string Path to saved signature
+     */
+    private function saveSignature($signatureBase64)
+    {
+        // Remove base64 prefix if exists
+        $signatureData = preg_replace('/^data:image\/\w+;base64,/', '', $signatureBase64);
+        
+        // Decode base64
+        $decodedSignature = base64_decode($signatureData);
+        
+        if ($decodedSignature === false) {
+            throw new \Exception('Invalid signature data');
+        }
+
+        // Generate unique filename
+        $fileName = 'signatures/' . Str::uuid() . '.png';
+        
+        // Save to storage (public disk)
+        Storage::disk('public')->put($fileName, $decodedSignature);
+        
+        return $fileName;
+    }
+
+    /**
+     * Optional: Get signature URL for display
+     * 
+     * @param string $signaturePath
+     * @return string Public URL
+     */
+    private function getSignatureUrl($signaturePath)
+    {
+        return Storage::disk('public')->url($signaturePath);
+    }
+
 }
